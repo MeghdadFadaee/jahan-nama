@@ -131,6 +131,8 @@ function main() {
     forceToLogin($username, $password, $cookieFile);
     $info = getInformation($cookieFile);
 
+    unlink($cookieFile);
+
     json_response([
         'status' => 0,
         'messages' => '',
