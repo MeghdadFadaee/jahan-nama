@@ -1,5 +1,11 @@
 name: Build & Release
 
+env:
+  APP_SLUG: jahan-nama
+  APP_EXE: jahan-nama.exe
+  APP_NAME: Jahan Nama
+  APP_MANUFACTURER: Jahan Nama
+
 on:
   push:
     tags:
@@ -22,6 +28,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Resolve version
+        id: version
         shell: pwsh
         run: |
           $versionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=' | Select-Object -First 1
@@ -36,9 +43,10 @@ jobs:
           }
 
           "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "app_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Stage app files
         shell: pwsh
@@ -46,18 +54,29 @@ jobs:
           $appDir = Join-Path $PWD.Path "dist\app"
           New-Item -ItemType Directory -Force -Path $appDir | Out-Null
 
-          Copy-Item -LiteralPath "target\release\mci-client.exe" -Destination $appDir
+          Copy-Item -LiteralPath "target\release\$env:APP_EXE" -Destination $appDir
           Copy-Item -LiteralPath "icon.ico" -Destination $appDir
           Copy-Item -LiteralPath ".env.example" -Destination $appDir
-          Copy-Item -LiteralPath "README.md" -Destination $appDir
-          Copy-Item -LiteralPath "LICENSE" -Destination $appDir
+
+          if (Test-Path -LiteralPath "README.md") {
+            Copy-Item -LiteralPath "README.md" -Destination $appDir
+          } else {
+            "# $env:APP_NAME`n`nWindows release package for $env:APP_NAME." |
+              Out-File -FilePath (Join-Path $appDir "README.md") -Encoding utf8
+          }
+
+          if (Test-Path -LiteralPath "LICENSE") {
+            Copy-Item -LiteralPath "LICENSE" -Destination $appDir
+          } else {
+            "MIT" | Out-File -FilePath (Join-Path $appDir "LICENSE") -Encoding utf8
+          }
 
       - name: Build portable zip
         shell: pwsh
         run: |
           Compress-Archive `
             -Path "dist\app\*" `
-            -DestinationPath "dist\mci-client-$env:APP_VERSION-windows-x64-portable.zip" `
+            -DestinationPath "dist\$env:APP_SLUG-$env:APP_VERSION-windows-x64-portable.zip" `
             -Force
 
       - name: Install WiX
@@ -69,16 +88,16 @@ jobs:
         run: |
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
           $appDir = Join-Path $PWD.Path "dist\app"
-          $msiPath = Join-Path $PWD.Path "dist\mci-client-$env:APP_VERSION-windows-x64.msi"
+          $msiPath = Join-Path $PWD.Path "dist\$env:APP_SLUG-$env:APP_VERSION-windows-x64.msi"
 
           wix build `
             -arch x64 `
             -d "SourceDir=$appDir" `
-            -d "ProductName=MCI Client" `
-            -d "Manufacturer=MCI Client" `
+            -d "ProductName=$env:APP_NAME" `
+            -d "Manufacturer=$env:APP_MANUFACTURER" `
             -d "Version=$env:APP_VERSION" `
             -o $msiPath `
-            "installer\wix\mci-client.wxs"
+            "installer\wix\jahan-nama.wxs"
 
       - name: Install Inno Setup
         shell: pwsh
@@ -89,8 +108,8 @@ jobs:
         run: |
           $appDir = Join-Path $PWD.Path "dist\app"
           $distDir = Join-Path $PWD.Path "dist"
-          $setupPath = Join-Path $distDir "mci-client-setup.exe"
-          $finalSetupPath = Join-Path $distDir "mci-client-$env:APP_VERSION-windows-x64-setup.exe"
+          $setupPath = Join-Path $distDir "$env:APP_SLUG-setup.exe"
+          $finalSetupPath = Join-Path $distDir "$env:APP_SLUG-$env:APP_VERSION-windows-x64-setup.exe"
           $innoCompiler = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
 
           if (!(Test-Path -LiteralPath $innoCompiler)) {
@@ -98,7 +117,7 @@ jobs:
           }
 
           & $innoCompiler `
-            "installer\inno\mci-client.iss" `
+            "installer\inno\jahan-nama.iss" `
             "/DAppVersion=$env:APP_VERSION" `
             "/DSourceDir=$appDir" `
             "/DOutputDir=$distDir"
@@ -111,20 +130,20 @@ jobs:
           $bundleDir = Join-Path $PWD.Path "dist\setup-bundle"
           New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
 
-          Copy-Item -LiteralPath "dist\mci-client-$env:APP_VERSION-windows-x64.msi" -Destination $bundleDir
-          Copy-Item -LiteralPath "dist\mci-client-$env:APP_VERSION-windows-x64-setup.exe" -Destination $bundleDir
-          Copy-Item -LiteralPath "README.md" -Destination $bundleDir
-          Copy-Item -LiteralPath "LICENSE" -Destination $bundleDir
+          Copy-Item -LiteralPath "dist\$env:APP_SLUG-$env:APP_VERSION-windows-x64.msi" -Destination $bundleDir
+          Copy-Item -LiteralPath "dist\$env:APP_SLUG-$env:APP_VERSION-windows-x64-setup.exe" -Destination $bundleDir
+          Copy-Item -LiteralPath "dist\app\README.md" -Destination $bundleDir
+          Copy-Item -LiteralPath "dist\app\LICENSE" -Destination $bundleDir
 
           Compress-Archive `
             -Path "$bundleDir\*" `
-            -DestinationPath "dist\mci-client-$env:APP_VERSION-windows-x64-setup-bundle.zip" `
+            -DestinationPath "dist\$env:APP_SLUG-$env:APP_VERSION-windows-x64-setup-bundle.zip" `
             -Force
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mci-client-windows-${{ env.APP_VERSION }}
+          name: jahan-nama-windows-${{ steps.version.outputs.app_version }}
           path: |
             dist/*.zip
             dist/*.msi
