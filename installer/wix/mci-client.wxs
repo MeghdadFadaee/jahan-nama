@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="$(var.ProductName)"
+    Manufacturer="$(var.Manufacturer)"
+    Version="$(var.Version)"
+    UpgradeCode="8F00A047-04B7-47E6-AAB0-4022A3C41F77"
+    Scope="perUser">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of $(var.ProductName) is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="InstallFolder" Name="$(var.ProductName)">
+        <Component Id="AppFiles" Guid="D3FA7E99-3E77-42E8-9DFE-4F03F4F9B3E7">
+          <File Id="AppExe" Source="$(var.SourceDir)\mci-client.exe" KeyPath="yes" />
+          <File Id="AppIcon" Source="$(var.SourceDir)\icon.ico" />
+          <File Id="EnvExample" Source="$(var.SourceDir)\.env.example" />
+          <File Id="Readme" Source="$(var.SourceDir)\README.md" />
+          <File Id="License" Source="$(var.SourceDir)\LICENSE" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)">
+        <Component Id="StartMenuShortcut" Guid="8E4D07B0-0160-4C4C-A16D-67F7801024F1">
+          <Shortcut
+            Id="ApplicationStartMenuShortcut"
+            Name="$(var.ProductName)"
+            Description="$(var.ProductName)"
+            Target="[InstallFolder]mci-client.exe"
+            WorkingDirectory="InstallFolder"
+            Icon="AppIconFile" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\$(var.Manufacturer)\$(var.ProductName)" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Icon Id="AppIconFile" SourceFile="$(var.SourceDir)\icon.ico" />
+
+    <Feature Id="MainFeature" Title="$(var.ProductName)" Level="1">
+      <ComponentRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>
