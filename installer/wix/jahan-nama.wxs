@@ -4,7 +4,7 @@
     Name="$(var.ProductName)"
     Manufacturer="$(var.Manufacturer)"
     Version="$(var.Version)"
-    UpgradeCode="8F00A047-04B7-47E6-AAB0-4022A3C41F77"
+    UpgradeCode="206174AF-D31A-4F20-9AFC-42FE5A2B7ADF"
     Scope="perUser">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of $(var.ProductName) is already installed." />
@@ -12,8 +12,8 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="InstallFolder" Name="$(var.ProductName)">
-        <Component Id="AppFiles" Guid="D3FA7E99-3E77-42E8-9DFE-4F03F4F9B3E7">
-          <File Id="AppExe" Source="$(var.SourceDir)\mci-client.exe" KeyPath="yes" />
+        <Component Id="AppFiles" Guid="FDA212C1-5DE9-407E-91AC-2CE5568D74F6">
+          <File Id="AppExe" Source="$(var.SourceDir)\jahan-nama.exe" KeyPath="yes" />
           <File Id="AppIcon" Source="$(var.SourceDir)\icon.ico" />
           <File Id="EnvExample" Source="$(var.SourceDir)\.env.example" />
           <File Id="Readme" Source="$(var.SourceDir)\README.md" />
@@ -24,12 +24,12 @@
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)">
-        <Component Id="StartMenuShortcut" Guid="8E4D07B0-0160-4C4C-A16D-67F7801024F1">
+        <Component Id="StartMenuShortcut" Guid="DB0FD70C-16FC-468B-A0D3-2035ACC37582">
           <Shortcut
             Id="ApplicationStartMenuShortcut"
             Name="$(var.ProductName)"
             Description="$(var.ProductName)"
-            Target="[InstallFolder]mci-client.exe"
+            Target="[InstallFolder]jahan-nama.exe"
             WorkingDirectory="InstallFolder"
             Icon="AppIconFile" />
           <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />

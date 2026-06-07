@@ -6,16 +6,16 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use mci_client::format::{error_json, megabytes_label, unused_json};
-use mci_client::{DotEnvStore, MciError, MciInternetClient, Result};
+use jahan_nama::format::{error_json, remain_json, remaining_label};
+use jahan_nama::{DotEnvStore, JahanNamaClient, JahanNamaError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Command {
     Gui,
     Json,
     Raw,
+    Remain,
     Test,
-    Unused,
     Help,
 }
 
@@ -62,8 +62,8 @@ fn run(args: Args) -> Result<()> {
             gui::run_gui(args.env_path, interval)
         }
         Command::Raw => {
-            let mut client = MciInternetClient::new(&args.env_path)?;
-            let payload = client.get_packages_response()?;
+            let mut client = JahanNamaClient::new(&args.env_path)?;
+            let payload = client.get_remain_response()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&payload).map_err(json_error)?
@@ -71,12 +71,10 @@ fn run(args: Args) -> Result<()> {
             Ok(())
         }
         Command::Test => run_test(&args.env_path),
-        Command::Unused => {
-            let mut client = MciInternetClient::new(&args.env_path)?;
-            let amounts = client.get_unused_amounts_bytes()?;
-            for amount in amounts {
-                println!("{}", megabytes_label(amount));
-            }
+        Command::Remain => {
+            let mut client = JahanNamaClient::new(&args.env_path)?;
+            let megabytes = client.get_remaining_traffic_mb()?;
+            println!("{}", remaining_label(megabytes));
             Ok(())
         }
         Command::Json | Command::Help => Ok(()),
@@ -84,53 +82,39 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn run_json(env_path: &Path) -> Result<()> {
-    let mut client = MciInternetClient::new(env_path)?;
-    let amounts = client.get_unused_amounts_bytes()?;
-    println!("{}", unused_json(&amounts));
+    let mut client = JahanNamaClient::new(env_path)?;
+    let megabytes = client.get_remaining_traffic_mb()?;
+    println!("{}", remain_json(megabytes));
     Ok(())
 }
 
 fn run_test(env_path: &Path) -> Result<()> {
-    println!("=== MCI Internet Client Test ===");
+    println!("=== Jahan Nama Client Test ===");
 
-    let mut client = MciInternetClient::new(env_path)?;
+    let mut client = JahanNamaClient::new(env_path)?;
     println!("\n[1] Checking existing token status...");
-    println!("Access token exists: {}", client.access_token().is_some());
-    println!("Refresh token exists: {}", client.refresh_token().is_some());
+    println!("Token exists: {}", client.token().is_some());
 
     println!("\n[2] Ensuring valid token...");
     let token = client.ensure_token(false)?;
     println!("Token acquired: {}...", token_preview(&token));
 
-    println!("\n[3] Fetching packages details...");
-    let packages = client.get_packages_response()?;
-    println!("Packages fetched successfully.");
+    println!("\n[3] Fetching remaining traffic...");
+    let payload = client.get_remain_response()?;
+    println!("Remaining traffic fetched successfully.");
 
     println!("\n--- Raw Response (truncated) ---");
-    let raw = serde_json::to_string_pretty(&packages).map_err(json_error)?;
+    let raw = serde_json::to_string_pretty(&payload).map_err(json_error)?;
     println!("{}...", raw.chars().take(300).collect::<String>());
 
-    println!("\n[4] Extracting unusedAmount values...");
-    let amounts = mci_client::collect_unused_amounts(&packages);
-    if amounts.is_empty() {
-        println!("No unusedAmount found!");
-    } else {
-        println!("Found {} entries:", amounts.len());
-        for (index, value) in amounts.iter().enumerate() {
-            println!(
-                "  {}. {} bytes (~{:.2} GB)",
-                index + 1,
-                value,
-                *value as f64 / 1024.0 / 1024.0 / 1024.0
-            );
-        }
-
-        let total: i64 = amounts.iter().sum();
-        println!(
-            "\nTotal unused: {total} bytes (~{:.2} GB)",
-            total as f64 / 1024.0 / 1024.0 / 1024.0
-        );
-    }
+    println!("\n[4] Extracting RemainTraffic...");
+    let megabytes = jahan_nama::remain_traffic_mb(&payload).ok_or(
+        JahanNamaError::UnexpectedResponse("Unexpected remaining traffic response format."),
+    )?;
+    println!(
+        "Remaining traffic: {megabytes:.2} MB ({})",
+        remaining_label(megabytes)
+    );
 
     println!("\n=== TEST SUCCESS ===");
     Ok(())
@@ -165,7 +149,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> std::result::Result<Arg
             "json" => set_command(&mut command, Command::Json)?,
             "raw" => set_command(&mut command, Command::Raw)?,
             "test" => set_command(&mut command, Command::Test)?,
-            "unused" => set_command(&mut command, Command::Unused)?,
+            "remain" | "unused" => set_command(&mut command, Command::Remain)?,
             unknown if unknown.starts_with('-') => {
                 return Err(format!("Unknown option: {unknown}"));
             }
@@ -192,7 +176,7 @@ fn interval_seconds(env_path: &Path, override_value: Option<u64>) -> u64 {
     override_value
         .or_else(|| {
             DotEnvStore::new(env_path).ok().and_then(|env| {
-                env.get("PULL_INTERVAL_SECONDS")
+                env.get("JAHAN_NAMA_INTERVAL_SECONDS")
                     .and_then(|value| value.parse().ok())
             })
         })
@@ -204,28 +188,29 @@ fn token_preview(token: &str) -> String {
     token.chars().take(20).collect()
 }
 
-fn json_error(error: serde_json::Error) -> MciError {
-    MciError::Json(error.to_string())
+fn json_error(error: serde_json::Error) -> JahanNamaError {
+    JahanNamaError::Json(error.to_string())
 }
 
 fn print_usage() {
     println!(
         "\
-MCI Internet Packages Client
+Jahan Nama Remaining Traffic Client
 
 Usage:
-  mci-client [OPTIONS] [COMMAND]
+  jahan-nama [OPTIONS] [COMMAND]
 
 Commands:
   gui       Show the floating desktop label (default)
-  unused    Print unused package amounts in MB
-  json      Print the compatibility JSON summary
-  raw       Print the full packages response
+  remain    Print remaining traffic
+  unused    Alias for remain
+  json      Print the JSON summary
+  raw       Print the full remaining traffic response
   test      Run the diagnostic flow
 
 Options:
   -e, --env <PATH>          .env file path (default: .env)
-  -i, --interval <SECONDS>  GUI polling interval (default: PULL_INTERVAL_SECONDS or 10)
+  -i, --interval <SECONDS>  GUI polling interval (default: JAHAN_NAMA_INTERVAL_SECONDS or 10)
   -h, --help               Show this help
 "
     );

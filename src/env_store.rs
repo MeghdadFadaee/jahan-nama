@@ -159,20 +159,20 @@ mod tests {
         let path = temp_env_path();
         fs::write(
             &path,
-            "# comment\nMCI_USERNAME=\"912\"\n\nMCI_ACCESS_TOKEN=\"old\"\n",
+            "# comment\nJAHAN_NAMA_USERNAME=\"user\"\n\nJAHAN_NAMA_TOKEN=\"old\"\n",
         )
         .unwrap();
 
         let mut env = DotEnvStore::new(&path).unwrap();
-        env.set("MCI_ACCESS_TOKEN", "new token");
-        env.set("MCI_REFRESH_TOKEN", "refresh");
+        env.set("JAHAN_NAMA_TOKEN", "new token");
+        env.set("JAHAN_NAMA_INTERVAL_SECONDS", "60");
         env.save().unwrap();
 
         let saved = fs::read_to_string(&path).unwrap();
         assert!(saved.contains("# comment\n"));
-        assert!(saved.contains("MCI_USERNAME=\"912\""));
-        assert!(saved.contains("MCI_ACCESS_TOKEN=\"new token\""));
-        assert!(saved.contains("MCI_REFRESH_TOKEN=\"refresh\""));
+        assert!(saved.contains("JAHAN_NAMA_USERNAME=\"user\""));
+        assert!(saved.contains("JAHAN_NAMA_TOKEN=\"new token\""));
+        assert!(saved.contains("JAHAN_NAMA_INTERVAL_SECONDS=\"60\""));
 
         fs::remove_file(path).unwrap();
     }
@@ -182,6 +182,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("mci-client-test-{nanos}.env"))
+        std::env::temp_dir().join(format!("jahan-nama-test-{nanos}.env"))
     }
 }

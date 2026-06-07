@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use mci_client::Result;
+use jahan_nama::Result;
 
 #[cfg(windows)]
 pub fn run_gui(env_path: PathBuf, interval_seconds: u64) -> Result<()> {
@@ -9,7 +9,7 @@ pub fn run_gui(env_path: PathBuf, interval_seconds: u64) -> Result<()> {
 
 #[cfg(not(windows))]
 pub fn run_gui(_env_path: PathBuf, _interval_seconds: u64) -> Result<()> {
-    Err(mci_client::MciError::Gui(
+    Err(jahan_nama::JahanNamaError::Gui(
         "GUI mode is currently implemented for Windows only.".to_owned(),
     ))
 }
@@ -25,8 +25,8 @@ mod windows_gui {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use mci_client::format::megabytes_label;
-    use mci_client::{DotEnvStore, MciError, MciInternetClient, Result, reset_saved_auth};
+    use jahan_nama::format::remaining_label;
+    use jahan_nama::{DotEnvStore, JahanNamaClient, JahanNamaError, Result, reset_saved_token};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
         BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen,
@@ -65,8 +65,8 @@ mod windows_gui {
         WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
     };
 
-    const CLASS_NAME: &str = "MciClientOverlayWindow";
-    const SETTINGS_CLASS_NAME: &str = "MciClientSettingsWindow";
+    const CLASS_NAME: &str = "JahanNamaOverlayWindow";
+    const SETTINGS_CLASS_NAME: &str = "JahanNamaSettingsWindow";
     const WINDOW_WIDTH: i32 = 520;
     const MIN_WINDOW_HEIGHT: i32 = 36;
     const MAX_WINDOW_HEIGHT: i32 = 360;
@@ -101,7 +101,7 @@ mod windows_gui {
     const SETTINGS_FONT: usize = 2004;
     const SETTINGS_FONT_SIZE: usize = 2005;
     const SETTINGS_SAVE: usize = 2010;
-    const SETTINGS_CLEAR_SESSION: usize = 2011;
+    const SETTINGS_CLEAR_TOKEN: usize = 2011;
     const SETTINGS_RELOAD: usize = 2012;
     const SETTINGS_CLOSE: usize = 2013;
 
@@ -125,7 +125,7 @@ mod windows_gui {
 
     struct ClientSlot {
         env_path: PathBuf,
-        client: Option<MciInternetClient>,
+        client: Option<JahanNamaClient>,
     }
 
     struct SettingsValues {
@@ -199,7 +199,7 @@ mod windows_gui {
             client: None,
         }));
         let class_name = wide(CLASS_NAME);
-        let title = wide("MCI Client");
+        let title = wide("Jahan Nama");
         let interval_ms = initial_settings
             .interval_seconds
             .saturating_mul(1000)
@@ -208,7 +208,7 @@ mod windows_gui {
         unsafe {
             let instance = GetModuleHandleW(null());
             if instance.is_null() {
-                return Err(MciError::Gui("GetModuleHandleW failed".to_owned()));
+                return Err(JahanNamaError::Gui("GetModuleHandleW failed".to_owned()));
             }
 
             let icon = load_app_icon();
@@ -227,7 +227,7 @@ mod windows_gui {
 
             if RegisterClassW(&wnd_class) == 0 {
                 destroy_loaded_icon(icon);
-                return Err(MciError::Gui("RegisterClassW failed".to_owned()));
+                return Err(JahanNamaError::Gui("RegisterClassW failed".to_owned()));
             }
 
             let font = create_font(
@@ -271,7 +271,7 @@ mod windows_gui {
 
             if hwnd.is_null() {
                 drop(Box::from_raw(state_ptr));
-                return Err(MciError::Gui("CreateWindowExW failed".to_owned()));
+                return Err(JahanNamaError::Gui("CreateWindowExW failed".to_owned()));
             }
 
             SetLayeredWindowAttributes(hwnd, rgb(0, 0, 0), 0, LWA_COLORKEY);
@@ -526,8 +526,8 @@ mod windows_gui {
         }
 
         fn reload_update(&mut self, did_reset: bool) -> LabelUpdate {
-            match self.unused_amounts() {
-                Ok(values) => values_update(values, did_reset),
+            match self.remaining_traffic_mb() {
+                Ok(megabytes) => value_update(megabytes, did_reset),
                 Err(error) => error_update(format!("Error: {error}")),
             }
         }
@@ -535,41 +535,32 @@ mod windows_gui {
         fn reset_auth(&mut self) -> std::result::Result<(), String> {
             match self.client.as_mut() {
                 Some(client) => client.reset_auth().map_err(|error| error.to_string())?,
-                None => reset_saved_auth(&self.env_path).map_err(|error| error.to_string())?,
+                None => reset_saved_token(&self.env_path).map_err(|error| error.to_string())?,
             }
             self.client = None;
             Ok(())
         }
 
-        fn unused_amounts(&mut self) -> std::result::Result<Vec<i64>, String> {
+        fn remaining_traffic_mb(&mut self) -> std::result::Result<f64, String> {
             if self.client.is_none() {
-                self.client = Some(
-                    MciInternetClient::new(&self.env_path).map_err(|error| error.to_string())?,
-                );
+                self.client =
+                    Some(JahanNamaClient::new(&self.env_path).map_err(|error| error.to_string())?);
             }
 
             self.client
                 .as_mut()
                 .expect("client initialized above")
-                .get_unused_amounts_bytes()
+                .get_remaining_traffic_mb()
                 .map_err(|error| error.to_string())
         }
     }
 
-    fn values_update(values: Vec<i64>, did_reset: bool) -> LabelUpdate {
-        let text = if values.is_empty() {
-            "No unusedAmount found".to_owned()
-        } else {
-            values
-                .into_iter()
-                .map(megabytes_label)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+    fn value_update(megabytes: f64, did_reset: bool) -> LabelUpdate {
+        let text = remaining_label(megabytes);
 
         LabelUpdate {
             text: if did_reset {
-                format!("Session reset\n{text}")
+                format!("Token reset\n{text}")
             } else {
                 text
             },
@@ -601,7 +592,7 @@ mod windows_gui {
 
             append_menu_item(menu, MENU_MANAGE, "Manage App");
             append_menu_item(menu, MENU_RELOAD, "Reload");
-            append_menu_item(menu, MENU_RESET, "Reset Session");
+            append_menu_item(menu, MENU_RESET, "Reset Token");
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             append_menu_item(menu, MENU_QUIT, "Quit");
 
@@ -641,12 +632,7 @@ mod windows_gui {
                 }
                 MENU_RESET => {
                     if let Some(state) = state_from_hwnd(hwnd).as_mut() {
-                        start_action(
-                            hwnd,
-                            state,
-                            FetchAction::Reset,
-                            Some("Resetting session..."),
-                        );
+                        start_action(hwnd, state, FetchAction::Reset, Some("Resetting token..."));
                     }
                 }
                 MENU_QUIT => {
@@ -680,7 +666,7 @@ mod windows_gui {
         unsafe {
             let instance = GetModuleHandleW(null());
             if instance.is_null() {
-                return Err(MciError::Gui("GetModuleHandleW failed".to_owned()));
+                return Err(JahanNamaError::Gui("GetModuleHandleW failed".to_owned()));
             }
 
             let class_name = wide(SETTINGS_CLASS_NAME);
@@ -701,11 +687,11 @@ mod windows_gui {
             let env_path = state
                 .client
                 .lock()
-                .map_err(|_| MciError::Gui("client lock poisoned".to_owned()))?
+                .map_err(|_| JahanNamaError::Gui("client lock poisoned".to_owned()))?
                 .env_path
                 .clone();
             let settings = load_settings_values(&env_path, state.interval_seconds);
-            let title = wide("Manage MCI Client");
+            let title = wide("Manage Jahan Nama");
             let settings_state = Box::new(SettingsState {
                 parent_hwnd: hwnd,
                 client: Arc::clone(&state.client),
@@ -740,7 +726,9 @@ mod windows_gui {
 
             if settings_hwnd.is_null() {
                 drop(Box::from_raw(state_ptr));
-                return Err(MciError::Gui("Could not open Manage App window".to_owned()));
+                return Err(JahanNamaError::Gui(
+                    "Could not open Manage App window".to_owned(),
+                ));
             }
 
             if !state.icon.is_null() {
@@ -793,7 +781,7 @@ mod windows_gui {
                     let command = loword(wparam);
                     match command {
                         SETTINGS_SAVE => save_settings_from_window(hwnd),
-                        SETTINGS_CLEAR_SESSION => clear_session_from_window(hwnd),
+                        SETTINGS_CLEAR_TOKEN => clear_token_from_window(hwnd),
                         SETTINGS_RELOAD => reload_from_settings_window(hwnd),
                         SETTINGS_CLOSE => {
                             DestroyWindow(hwnd);
@@ -863,7 +851,7 @@ mod windows_gui {
                     right: 588,
                     bottom: 84,
                 },
-                "Account, refresh, and overlay preferences",
+                "Account, polling, and overlay preferences",
                 DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX,
             );
 
@@ -942,10 +930,10 @@ mod windows_gui {
             );
 
             draw_section_title(hdc, state.section_font, "Credentials", 48, 110);
-            draw_field_label(hdc, state.label_font, "MCI username", 48, 150);
-            draw_field_label(hdc, state.label_font, "MCI password", 48, 188);
+            draw_field_label(hdc, state.label_font, "Username", 48, 150);
+            draw_field_label(hdc, state.label_font, "Password", 48, 188);
 
-            draw_section_title(hdc, state.section_font, "Refresh", 48, 260);
+            draw_section_title(hdc, state.section_font, "Polling", 48, 260);
             draw_field_label(hdc, state.label_font, "Pull interval", 48, 288);
             draw_text(
                 hdc,
@@ -1141,8 +1129,8 @@ mod windows_gui {
                 hot_fill: rgb(34, 124, 247),
                 pressed_fill: rgb(15, 93, 205),
             }),
-            SETTINGS_CLEAR_SESSION => Some(ButtonVisual {
-                label: "Clear session",
+            SETTINGS_CLEAR_TOKEN => Some(ButtonVisual {
+                label: "Clear token",
                 fill: rgb(255, 245, 245),
                 border: rgb(255, 200, 200),
                 text: rgb(176, 48, 48),
@@ -1243,14 +1231,14 @@ mod windows_gui {
 
             let clear = create_button(
                 hwnd,
-                SETTINGS_CLEAR_SESSION,
+                SETTINGS_CLEAR_TOKEN,
                 Bounds {
                     x: 32,
                     y: 434,
                     width: 126,
                     height: 34,
                 },
-                "Clear session",
+                "Clear token",
                 false,
             );
             let reload = create_button(
@@ -1352,11 +1340,11 @@ mod windows_gui {
                 .and_then(|mut client| {
                     let mut env =
                         DotEnvStore::new(&client.env_path).map_err(|error| error.to_string())?;
-                    env.set("MCI_USERNAME", username);
-                    env.set("MCI_PASSWORD", password);
-                    env.set("PULL_INTERVAL_SECONDS", interval.to_string());
-                    env.set("MCI_LABEL_FONT_FAMILY", label_font.clone());
-                    env.set("MCI_LABEL_FONT_SIZE", label_font_size.to_string());
+                    env.set("JAHAN_NAMA_USERNAME", username);
+                    env.set("JAHAN_NAMA_PASSWORD", password);
+                    env.set("JAHAN_NAMA_INTERVAL_SECONDS", interval.to_string());
+                    env.set("JAHAN_NAMA_LABEL_FONT_FAMILY", label_font.clone());
+                    env.set("JAHAN_NAMA_LABEL_FONT_SIZE", label_font_size.to_string());
                     env.save().map_err(|error| error.to_string())?;
                     client.client = None;
                     Ok(())
@@ -1383,7 +1371,7 @@ mod windows_gui {
         }
     }
 
-    unsafe fn clear_session_from_window(hwnd: HWND) {
+    unsafe fn clear_token_from_window(hwnd: HWND) {
         unsafe {
             let Some(settings) = settings_state_from_hwnd(hwnd).as_ref() else {
                 return;
@@ -1397,7 +1385,7 @@ mod windows_gui {
 
             match result {
                 Ok(()) => {
-                    set_parent_label(settings.parent_hwnd, "Session cleared", LabelKind::Normal)
+                    set_parent_label(settings.parent_hwnd, "Token cleared", LabelKind::Normal)
                 }
                 Err(error) => {
                     set_parent_label(
@@ -1500,7 +1488,7 @@ mod windows_gui {
             hIcon: icon,
             ..Default::default()
         };
-        copy_wide(&mut data.szTip, "MCI Client");
+        copy_wide(&mut data.szTip, "Jahan Nama");
         data
     }
 
@@ -1718,28 +1706,28 @@ mod windows_gui {
                 .to_owned()
         };
 
-        let interval_seconds = get("PULL_INTERVAL_SECONDS")
+        let interval_seconds = get("JAHAN_NAMA_INTERVAL_SECONDS")
             .parse::<u64>()
             .ok()
             .filter(|value| *value > 0)
             .unwrap_or(fallback_interval.max(1));
         let label_font = {
-            let value = get("MCI_LABEL_FONT_FAMILY");
+            let value = get("JAHAN_NAMA_LABEL_FONT_FAMILY");
             if value.trim().is_empty() {
                 DEFAULT_LABEL_FONT.to_owned()
             } else {
                 value
             }
         };
-        let label_font_size = get("MCI_LABEL_FONT_SIZE")
+        let label_font_size = get("JAHAN_NAMA_LABEL_FONT_SIZE")
             .parse::<i32>()
             .ok()
             .filter(|value| (8..=72).contains(value))
             .unwrap_or(DEFAULT_LABEL_FONT_SIZE);
 
         SettingsValues {
-            username: get("MCI_USERNAME"),
-            password: get("MCI_PASSWORD"),
+            username: get("JAHAN_NAMA_USERNAME"),
+            password: get("JAHAN_NAMA_PASSWORD"),
             interval_seconds,
             label_font,
             label_font_size,

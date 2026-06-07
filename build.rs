@@ -9,7 +9,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let resource = manifest_dir.join("app.rc");
-    let compiled = out_dir.join("mci-client.res");
+    let compiled = out_dir.join("jahan-nama.res");
 
     println!("cargo:rerun-if-changed={}", resource.display());
     println!(
