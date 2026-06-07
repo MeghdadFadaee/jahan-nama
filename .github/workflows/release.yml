@@ -1,0 +1,142 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build Windows installers
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $versionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=' | Select-Object -First 1
+          $version = ($versionLine.Line -replace '^version\s*=\s*"', '') -replace '"$', ''
+
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          }
+
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Installer version must be in x.y.z format, got '$version'."
+          }
+
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage app files
+        shell: pwsh
+        run: |
+          $appDir = Join-Path $PWD.Path "dist\app"
+          New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+
+          Copy-Item -LiteralPath "target\release\mci-client.exe" -Destination $appDir
+          Copy-Item -LiteralPath "icon.ico" -Destination $appDir
+          Copy-Item -LiteralPath ".env.example" -Destination $appDir
+          Copy-Item -LiteralPath "README.md" -Destination $appDir
+          Copy-Item -LiteralPath "LICENSE" -Destination $appDir
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "dist\app\*" `
+            -DestinationPath "dist\mci-client-$env:APP_VERSION-windows-x64-portable.zip" `
+            -Force
+
+      - name: Install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix --version 4.0.5
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          $appDir = Join-Path $PWD.Path "dist\app"
+          $msiPath = Join-Path $PWD.Path "dist\mci-client-$env:APP_VERSION-windows-x64.msi"
+
+          wix build `
+            -arch x64 `
+            -d "SourceDir=$appDir" `
+            -d "ProductName=MCI Client" `
+            -d "Manufacturer=MCI Client" `
+            -d "Version=$env:APP_VERSION" `
+            -o $msiPath `
+            "installer\wix\mci-client.wxs"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build setup.exe installer
+        shell: pwsh
+        run: |
+          $appDir = Join-Path $PWD.Path "dist\app"
+          $distDir = Join-Path $PWD.Path "dist"
+          $setupPath = Join-Path $distDir "mci-client-setup.exe"
+          $finalSetupPath = Join-Path $distDir "mci-client-$env:APP_VERSION-windows-x64-setup.exe"
+          $innoCompiler = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+
+          if (!(Test-Path -LiteralPath $innoCompiler)) {
+            $innoCompiler = (Get-Command ISCC.exe).Source
+          }
+
+          & $innoCompiler `
+            "installer\inno\mci-client.iss" `
+            "/DAppVersion=$env:APP_VERSION" `
+            "/DSourceDir=$appDir" `
+            "/DOutputDir=$distDir"
+
+          Move-Item -LiteralPath $setupPath -Destination $finalSetupPath -Force
+
+      - name: Build setup bundle
+        shell: pwsh
+        run: |
+          $bundleDir = Join-Path $PWD.Path "dist\setup-bundle"
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+
+          Copy-Item -LiteralPath "dist\mci-client-$env:APP_VERSION-windows-x64.msi" -Destination $bundleDir
+          Copy-Item -LiteralPath "dist\mci-client-$env:APP_VERSION-windows-x64-setup.exe" -Destination $bundleDir
+          Copy-Item -LiteralPath "README.md" -Destination $bundleDir
+          Copy-Item -LiteralPath "LICENSE" -Destination $bundleDir
+
+          Compress-Archive `
+            -Path "$bundleDir\*" `
+            -DestinationPath "dist\mci-client-$env:APP_VERSION-windows-x64-setup-bundle.zip" `
+            -Force
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mci-client-windows-${{ env.APP_VERSION }}
+          path: |
+            dist/*.zip
+            dist/*.msi
+            dist/*.exe
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.msi
+            dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
