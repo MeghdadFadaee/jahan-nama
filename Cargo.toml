@@ -9,6 +9,12 @@ license = "MIT"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+dirs = "6"
+eframe = "0.34"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tray-icon = "0.24"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

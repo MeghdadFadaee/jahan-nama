@@ -7,11 +7,720 @@ pub fn run_gui(env_path: PathBuf, interval_seconds: u64) -> Result<()> {
     windows_gui::run(env_path, interval_seconds)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn run_gui(env_path: PathBuf, interval_seconds: u64) -> Result<()> {
+    macos_gui::run(env_path, interval_seconds)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn run_gui(_env_path: PathBuf, _interval_seconds: u64) -> Result<()> {
     Err(jahan_nama::JahanNamaError::Gui(
-        "GUI mode is currently implemented for Windows only.".to_owned(),
+        "GUI mode is currently implemented for Windows and macOS only.".to_owned(),
     ))
+}
+
+#[cfg(target_os = "macos")]
+mod macos_gui {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use eframe::egui::{
+        self, Align, Button, CentralPanel, Color32, Context, CornerRadius, DragValue, Frame, Id,
+        Layout, Margin, RichText, Sense, Stroke, TextEdit, ViewportBuilder, ViewportCommand,
+        ViewportId,
+    };
+    use jahan_nama::format::remaining_label;
+    use jahan_nama::{DotEnvStore, JahanNamaClient, JahanNamaError, Result, reset_saved_token};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+    const DEFAULT_LABEL_FONT: &str = "SF Pro Text";
+    const DEFAULT_LABEL_FONT_SIZE: i32 = 15;
+    const DEFAULT_OVERLAY_WIDTH: f32 = 300.0;
+    const DEFAULT_OVERLAY_HEIGHT: f32 = 92.0;
+    const DEFAULT_OVERLAY_X: f32 = 960.0;
+    const DEFAULT_OVERLAY_Y: f32 = 64.0;
+
+    const MENU_RELOAD: &str = "reload";
+    const MENU_TOGGLE_OVERLAY: &str = "toggle-overlay";
+    const MENU_SETTINGS: &str = "settings";
+    const MENU_RESET_TOKEN: &str = "reset-token";
+    const MENU_OPEN_CONFIG: &str = "open-config";
+    const MENU_QUIT: &str = "quit";
+
+    pub fn run(env_path: PathBuf, interval_seconds: u64) -> Result<()> {
+        let env_path = resolve_env_path(env_path);
+        let settings = SettingsValues::load(&env_path, interval_seconds);
+        let viewport = ViewportBuilder::default()
+            .with_title("Jahan Nama")
+            .with_inner_size([DEFAULT_OVERLAY_WIDTH, DEFAULT_OVERLAY_HEIGHT])
+            .with_min_inner_size([260.0, 76.0])
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_position(settings.overlay_position());
+
+        let options = eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        };
+
+        eframe::run_native(
+            "Jahan Nama",
+            options,
+            Box::new(move |creation| {
+                Ok(Box::new(MacApp::new(
+                    creation,
+                    env_path.clone(),
+                    settings.clone(),
+                )))
+            }),
+        )
+        .map_err(|error| JahanNamaError::Gui(error.to_string()))
+    }
+
+    #[derive(Clone)]
+    struct SettingsValues {
+        username: String,
+        password: String,
+        interval_seconds: u64,
+        label_font: String,
+        label_font_size: i32,
+        overlay_visible: bool,
+        overlay_x: Option<f32>,
+        overlay_y: Option<f32>,
+    }
+
+    impl SettingsValues {
+        fn load(env_path: &Path, interval_seconds: u64) -> Self {
+            let env = DotEnvStore::new(env_path).ok();
+            let get = |key: &str| {
+                env.as_ref()
+                    .and_then(|store| store.get(key))
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+
+            Self {
+                username: get("JAHAN_NAMA_USERNAME"),
+                password: get("JAHAN_NAMA_PASSWORD"),
+                interval_seconds: get("JAHAN_NAMA_INTERVAL_SECONDS")
+                    .parse()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .unwrap_or(interval_seconds.max(1)),
+                label_font: {
+                    let value = get("JAHAN_NAMA_LABEL_FONT_FAMILY");
+                    if value.is_empty() {
+                        DEFAULT_LABEL_FONT.to_owned()
+                    } else {
+                        value
+                    }
+                },
+                label_font_size: get("JAHAN_NAMA_LABEL_FONT_SIZE")
+                    .parse()
+                    .ok()
+                    .filter(|value| (9..=48).contains(value))
+                    .unwrap_or(DEFAULT_LABEL_FONT_SIZE),
+                overlay_visible: get_bool(&get("JAHAN_NAMA_OVERLAY_VISIBLE")).unwrap_or(true),
+                overlay_x: get("JAHAN_NAMA_OVERLAY_X").parse().ok(),
+                overlay_y: get("JAHAN_NAMA_OVERLAY_Y").parse().ok(),
+            }
+        }
+
+        fn overlay_position(&self) -> egui::Pos2 {
+            egui::pos2(
+                self.overlay_x.unwrap_or(DEFAULT_OVERLAY_X),
+                self.overlay_y.unwrap_or(DEFAULT_OVERLAY_Y),
+            )
+        }
+
+        fn has_credentials(&self) -> bool {
+            !self.username.trim().is_empty() && !self.password.is_empty()
+        }
+    }
+
+    #[derive(Clone)]
+    struct SettingsDraft {
+        username: String,
+        password: String,
+        interval_seconds: u64,
+        label_font: String,
+        label_font_size: i32,
+        overlay_visible: bool,
+    }
+
+    impl From<&SettingsValues> for SettingsDraft {
+        fn from(values: &SettingsValues) -> Self {
+            Self {
+                username: values.username.clone(),
+                password: values.password.clone(),
+                interval_seconds: values.interval_seconds,
+                label_font: values.label_font.clone(),
+                label_font_size: values.label_font_size,
+                overlay_visible: values.overlay_visible,
+            }
+        }
+    }
+
+    enum FetchMessage {
+        Done(std::result::Result<f64, String>),
+    }
+
+    struct TrayHandles {
+        tray: TrayIcon,
+        toggle_overlay: MenuItem,
+    }
+
+    struct MacApp {
+        env_path: PathBuf,
+        settings: SettingsValues,
+        draft: SettingsDraft,
+        label: String,
+        detail: String,
+        status: LabelStatus,
+        fetching: bool,
+        next_fetch: Instant,
+        fetch_tx: Sender<FetchMessage>,
+        fetch_rx: Receiver<FetchMessage>,
+        menu_rx: Receiver<String>,
+        tray: Option<TrayHandles>,
+        show_settings: bool,
+        message: Option<String>,
+        applied_visibility: Option<bool>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum LabelStatus {
+        Loading,
+        Ready,
+        Error,
+    }
+
+    impl MacApp {
+        fn new(
+            creation: &eframe::CreationContext<'_>,
+            env_path: PathBuf,
+            settings: SettingsValues,
+        ) -> Self {
+            let (fetch_tx, fetch_rx) = mpsc::channel();
+            let (menu_tx, menu_rx) = mpsc::channel();
+            let ctx = creation.egui_ctx.clone();
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                let _ = menu_tx.send(event.id().as_ref().to_owned());
+                ctx.request_repaint();
+            }));
+
+            let mut app = Self {
+                env_path,
+                draft: SettingsDraft::from(&settings),
+                settings,
+                label: "Loading".to_owned(),
+                detail: "Checking remaining traffic".to_owned(),
+                status: LabelStatus::Loading,
+                fetching: false,
+                next_fetch: Instant::now(),
+                fetch_tx,
+                fetch_rx,
+                menu_rx,
+                tray: None,
+                show_settings: false,
+                message: None,
+                applied_visibility: None,
+            };
+
+            app.tray = match create_tray(&app.label, app.settings.overlay_visible) {
+                Ok(tray) => Some(tray),
+                Err(error) => {
+                    app.message = Some(format!("Menu bar item unavailable: {error}"));
+                    None
+                }
+            };
+
+            if !app.settings.has_credentials() {
+                app.open_settings();
+                app.status = LabelStatus::Error;
+                app.label = "Setup needed".to_owned();
+                app.detail = "Add your account in Settings".to_owned();
+                app.update_tray_title();
+            } else {
+                app.start_fetch(&creation.egui_ctx, true);
+            }
+
+            app
+        }
+
+        fn start_fetch(&mut self, ctx: &Context, force: bool) {
+            if self.fetching && !force {
+                return;
+            }
+
+            if !self.settings.has_credentials() {
+                self.open_settings();
+                self.status = LabelStatus::Error;
+                self.label = "Setup needed".to_owned();
+                self.detail = "Add your account in Settings".to_owned();
+                self.update_tray_title();
+                return;
+            }
+
+            self.fetching = true;
+            self.status = LabelStatus::Loading;
+            self.detail = "Checking remaining traffic".to_owned();
+            self.update_tray_title();
+
+            let env_path = self.env_path.clone();
+            let tx = self.fetch_tx.clone();
+            let ctx = ctx.clone();
+            thread::spawn(move || {
+                let result = fetch_remaining_mb(&env_path).map_err(|error| error.to_string());
+                let _ = tx.send(FetchMessage::Done(result));
+                ctx.request_repaint();
+            });
+        }
+
+        fn apply_fetch_result(&mut self, result: std::result::Result<f64, String>) {
+            self.fetching = false;
+            self.next_fetch =
+                Instant::now() + Duration::from_secs(self.settings.interval_seconds.max(1));
+
+            match result {
+                Ok(megabytes) => {
+                    self.status = LabelStatus::Ready;
+                    self.label = remaining_label(megabytes);
+                    self.detail = "Remaining traffic".to_owned();
+                    self.message = None;
+                }
+                Err(error) => {
+                    self.status = LabelStatus::Error;
+                    self.label = "Refresh failed".to_owned();
+                    self.detail = compact_error(&error);
+                    self.message = Some(error);
+                }
+            }
+
+            self.update_tray_title();
+        }
+
+        fn open_settings(&mut self) {
+            self.draft = SettingsDraft::from(&self.settings);
+            self.show_settings = true;
+        }
+
+        fn save_settings(&mut self, ctx: &Context) {
+            let result = (|| -> Result<()> {
+                ensure_env_parent(&self.env_path)?;
+                let mut env = DotEnvStore::new(&self.env_path)?;
+                env.set("JAHAN_NAMA_USERNAME", self.draft.username.trim());
+                env.set("JAHAN_NAMA_PASSWORD", self.draft.password.clone());
+                env.set(
+                    "JAHAN_NAMA_INTERVAL_SECONDS",
+                    self.draft.interval_seconds.max(1).to_string(),
+                );
+                env.set(
+                    "JAHAN_NAMA_LABEL_FONT_FAMILY",
+                    self.draft.label_font.clone(),
+                );
+                env.set(
+                    "JAHAN_NAMA_LABEL_FONT_SIZE",
+                    self.draft.label_font_size.clamp(9, 48).to_string(),
+                );
+                env.set(
+                    "JAHAN_NAMA_OVERLAY_VISIBLE",
+                    bool_env(self.draft.overlay_visible),
+                );
+                env.save()
+            })();
+
+            match result {
+                Ok(()) => {
+                    self.settings.username = self.draft.username.trim().to_owned();
+                    self.settings.password = self.draft.password.clone();
+                    self.settings.interval_seconds = self.draft.interval_seconds.max(1);
+                    self.settings.label_font = self.draft.label_font.clone();
+                    self.settings.label_font_size = self.draft.label_font_size.clamp(9, 48);
+                    self.settings.overlay_visible = self.draft.overlay_visible;
+                    self.message = Some("Settings saved.".to_owned());
+                    self.update_overlay_menu_text();
+                    self.apply_overlay_visibility(ctx);
+                    self.start_fetch(ctx, true);
+                }
+                Err(error) => {
+                    self.message = Some(format!("Could not save settings: {error}"));
+                }
+            }
+        }
+
+        fn reset_token(&mut self, ctx: &Context) {
+            let result =
+                ensure_env_parent(&self.env_path).and_then(|_| reset_saved_token(&self.env_path));
+            match result {
+                Ok(()) => {
+                    self.message = Some("Saved token cleared.".to_owned());
+                    self.start_fetch(ctx, true);
+                }
+                Err(error) => {
+                    self.message = Some(format!("Could not clear token: {error}"));
+                }
+            }
+        }
+
+        fn open_config_folder(&mut self) {
+            match self.env_path.parent() {
+                Some(parent) => {
+                    let _ = fs::create_dir_all(parent);
+                    if let Err(error) = Command::new("open").arg(parent).spawn() {
+                        self.message = Some(format!("Could not open config folder: {error}"));
+                    }
+                }
+                None => {
+                    self.message = Some("Config folder is not available.".to_owned());
+                }
+            }
+        }
+
+        fn update_tray_title(&self) {
+            if let Some(tray) = &self.tray {
+                tray.tray.set_title(Some(self.label.as_str()));
+                let tooltip = format!("Jahan Nama - {}", self.detail);
+                let _ = tray.tray.set_tooltip(Some(tooltip.as_str()));
+            }
+        }
+
+        fn update_overlay_menu_text(&self) {
+            if let Some(tray) = &self.tray {
+                let label = if self.settings.overlay_visible {
+                    "Hide Overlay"
+                } else {
+                    "Show Overlay"
+                };
+                tray.toggle_overlay.set_text(label);
+            }
+        }
+
+        fn apply_overlay_visibility(&mut self, ctx: &Context) {
+            if self.applied_visibility != Some(self.settings.overlay_visible) {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(self.settings.overlay_visible));
+                self.applied_visibility = Some(self.settings.overlay_visible);
+            }
+        }
+
+        fn handle_menu(&mut self, id: &str, ctx: &Context) {
+            match id {
+                MENU_RELOAD => self.start_fetch(ctx, true),
+                MENU_TOGGLE_OVERLAY => {
+                    self.settings.overlay_visible = !self.settings.overlay_visible;
+                    self.draft.overlay_visible = self.settings.overlay_visible;
+                    self.update_overlay_menu_text();
+                    self.apply_overlay_visibility(ctx);
+                }
+                MENU_SETTINGS => self.open_settings(),
+                MENU_RESET_TOKEN => self.reset_token(ctx),
+                MENU_OPEN_CONFIG => self.open_config_folder(),
+                MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
+                _ => {}
+            }
+        }
+
+        fn show_overlay(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+            let fill = match self.status {
+                LabelStatus::Loading => Color32::from_rgb(31, 36, 45),
+                LabelStatus::Ready => Color32::from_rgb(21, 42, 37),
+                LabelStatus::Error => Color32::from_rgb(54, 28, 32),
+            };
+            let accent = match self.status {
+                LabelStatus::Loading => Color32::from_rgb(152, 170, 192),
+                LabelStatus::Ready => Color32::from_rgb(83, 210, 153),
+                LabelStatus::Error => Color32::from_rgb(245, 112, 112),
+            };
+
+            ui.set_min_size(ui.available_size());
+            Frame::new()
+                .fill(fill)
+                .stroke(Stroke::new(1.0, accent.linear_multiply(0.5)))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    let drag_rect = ui.max_rect();
+                    let drag_response =
+                        ui.interact(drag_rect, Id::new("overlay-drag"), Sense::click_and_drag());
+                    if drag_response.drag_started() {
+                        ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(&self.detail)
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(184, 194, 207)),
+                            );
+                            ui.label(
+                                RichText::new(&self.label)
+                                    .size(self.settings.label_font_size as f32 + 7.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                        });
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(Button::new("Settings")).clicked() {
+                                self.open_settings();
+                            }
+                            if ui
+                                .add_enabled(!self.fetching, Button::new("Reload"))
+                                .clicked()
+                            {
+                                self.start_fetch(ctx, true);
+                            }
+                        });
+                    });
+                });
+        }
+
+        fn show_settings_window(&mut self, ctx: &Context) {
+            let mut close_requested = false;
+            let builder = ViewportBuilder::default()
+                .with_title("Jahan Nama Settings")
+                .with_inner_size([520.0, 390.0])
+                .with_min_inner_size([480.0, 360.0])
+                .with_resizable(false);
+
+            ctx.show_viewport_immediate(
+                ViewportId::from_hash_of("settings"),
+                builder,
+                |ui, _class| {
+                    if ui.input(|input| input.viewport().close_requested()) {
+                        close_requested = true;
+                    }
+
+                    CentralPanel::default()
+                        .frame(
+                            Frame::new()
+                                .fill(Color32::from_rgb(245, 247, 250))
+                                .inner_margin(Margin::same(18)),
+                        )
+                        .show_inside(ui, |ui| {
+                            ui.heading("Jahan Nama");
+                            ui.label("Account and display settings");
+                            ui.add_space(12.0);
+
+                            ui.label("Username");
+                            ui.add(
+                                TextEdit::singleline(&mut self.draft.username)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.add_space(8.0);
+
+                            ui.label("Password");
+                            ui.add(
+                                TextEdit::singleline(&mut self.draft.password)
+                                    .password(true)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.add_space(8.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("Refresh interval");
+                                ui.add(
+                                    DragValue::new(&mut self.draft.interval_seconds)
+                                        .range(5..=86_400)
+                                        .speed(1.0),
+                                );
+                                ui.label("seconds");
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Font");
+                                ui.add(
+                                    TextEdit::singleline(&mut self.draft.label_font)
+                                        .desired_width(190.0),
+                                );
+                                ui.label("Size");
+                                ui.add(
+                                    DragValue::new(&mut self.draft.label_font_size)
+                                        .range(9..=48)
+                                        .speed(1.0),
+                                );
+                            });
+
+                            ui.checkbox(&mut self.draft.overlay_visible, "Show floating overlay");
+
+                            if let Some(message) = &self.message {
+                                ui.add_space(10.0);
+                                ui.label(
+                                    RichText::new(message).color(Color32::from_rgb(70, 82, 96)),
+                                );
+                            }
+
+                            ui.with_layout(Layout::bottom_up(Align::RIGHT), |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("Close").clicked() {
+                                        close_requested = true;
+                                    }
+                                    if ui.button("Open Config Folder").clicked() {
+                                        self.open_config_folder();
+                                    }
+                                    if ui.button("Reset Token").clicked() {
+                                        self.reset_token(ctx);
+                                    }
+                                    if ui.button("Save").clicked() {
+                                        self.save_settings(ctx);
+                                    }
+                                });
+                            });
+                        });
+                },
+            );
+
+            if close_requested {
+                self.show_settings = false;
+            }
+        }
+    }
+
+    impl eframe::App for MacApp {
+        fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            let ctx = ui.ctx().clone();
+
+            while let Ok(message) = self.fetch_rx.try_recv() {
+                match message {
+                    FetchMessage::Done(result) => self.apply_fetch_result(result),
+                }
+            }
+
+            while let Ok(id) = self.menu_rx.try_recv() {
+                self.handle_menu(&id, &ctx);
+            }
+
+            self.apply_overlay_visibility(&ctx);
+
+            if !self.fetching && Instant::now() >= self.next_fetch {
+                self.start_fetch(&ctx, false);
+            }
+
+            self.show_overlay(ui, &ctx);
+
+            if self.show_settings {
+                self.show_settings_window(&ctx);
+            }
+
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn fetch_remaining_mb(env_path: &Path) -> Result<f64> {
+        let mut client = JahanNamaClient::new(env_path)?;
+        client.get_remaining_traffic_mb()
+    }
+
+    fn create_tray(label: &str, overlay_visible: bool) -> std::result::Result<TrayHandles, String> {
+        let menu = Menu::new();
+        let reload = MenuItem::with_id(MENU_RELOAD, "Reload Now", true, None);
+        let toggle_overlay = MenuItem::with_id(
+            MENU_TOGGLE_OVERLAY,
+            if overlay_visible {
+                "Hide Overlay"
+            } else {
+                "Show Overlay"
+            },
+            true,
+            None,
+        );
+        let settings = MenuItem::with_id(MENU_SETTINGS, "Settings", true, None);
+        let reset = MenuItem::with_id(MENU_RESET_TOKEN, "Reset Token", true, None);
+        let open_config = MenuItem::with_id(MENU_OPEN_CONFIG, "Open Config Folder", true, None);
+        let quit = MenuItem::with_id(MENU_QUIT, "Quit", true, None);
+        let separator_a = PredefinedMenuItem::separator();
+        let separator_b = PredefinedMenuItem::separator();
+
+        menu.append(&reload).map_err(|error| error.to_string())?;
+        menu.append(&toggle_overlay)
+            .map_err(|error| error.to_string())?;
+        menu.append(&settings).map_err(|error| error.to_string())?;
+        menu.append(&separator_a)
+            .map_err(|error| error.to_string())?;
+        menu.append(&reset).map_err(|error| error.to_string())?;
+        menu.append(&open_config)
+            .map_err(|error| error.to_string())?;
+        menu.append(&separator_b)
+            .map_err(|error| error.to_string())?;
+        menu.append(&quit).map_err(|error| error.to_string())?;
+
+        let icon = load_tray_icon()?;
+        let tray = TrayIconBuilder::new()
+            .with_title(label)
+            .with_tooltip("Jahan Nama")
+            .with_icon(icon)
+            .with_icon_as_template(true)
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(true)
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        Ok(TrayHandles {
+            tray,
+            toggle_overlay,
+        })
+    }
+
+    fn load_tray_icon() -> std::result::Result<Icon, String> {
+        let image = image::load_from_memory(include_bytes!("../icon.png"))
+            .map_err(|error| error.to_string())?
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        Icon::from_rgba(image.into_raw(), width, height).map_err(|error| error.to_string())
+    }
+
+    fn resolve_env_path(path: PathBuf) -> PathBuf {
+        if path != PathBuf::from(".env") {
+            return path;
+        }
+
+        if path.exists() || Path::new("Cargo.toml").exists() {
+            return path;
+        }
+
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Jahan Nama")
+            .join(".env")
+    }
+
+    fn ensure_env_parent(path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(())
+    }
+
+    fn get_bool(value: &str) -> Option<bool> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn bool_env(value: bool) -> &'static str {
+        if value { "true" } else { "false" }
+    }
+
+    fn compact_error(error: &str) -> String {
+        if error.contains("Missing required environment variable") {
+            "Account settings are incomplete".to_owned()
+        } else if error.len() > 80 {
+            format!("{}...", error.chars().take(77).collect::<String>())
+        } else {
+            error.to_owned()
+        }
+    }
 }
 
 #[cfg(windows)]

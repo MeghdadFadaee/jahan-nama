@@ -6,10 +6,11 @@ It logs in with your account credentials, stores the returned token in your `.en
 
 ## Features
 
-- Windows floating overlay for remaining traffic.
-- Tray menu with reload, token reset, settings, and quit actions.
+- macOS menu-bar app with a floating overlay, settings window, reload, token reset, and quit actions.
+- Windows floating overlay with tray menu, reload, token reset, settings, and quit actions.
 - CLI commands for raw API output, JSON output, diagnostics, and remaining traffic.
 - Windows release packaging through GitHub Actions, WiX MSI, Inno Setup installer, and portable zip.
+- macOS `.app` and unsigned `.dmg` packaging through `scripts/package-macos.sh`.
 
 ## Configuration
 
@@ -20,76 +21,99 @@ JAHAN_NAMA_USERNAME=
 JAHAN_NAMA_PASSWORD=
 JAHAN_NAMA_TOKEN=
 JAHAN_NAMA_INTERVAL_SECONDS=60
+JAHAN_NAMA_LABEL_FONT_FAMILY=SF Pro Text
+JAHAN_NAMA_LABEL_FONT_SIZE=15
+JAHAN_NAMA_OVERLAY_VISIBLE=true
+JAHAN_NAMA_OVERLAY_X=
+JAHAN_NAMA_OVERLAY_Y=
 ```
 
 Only `JAHAN_NAMA_USERNAME` and `JAHAN_NAMA_PASSWORD` are required for the first login. `JAHAN_NAMA_TOKEN` is managed by the app.
 
-Optional GUI settings are saved automatically by the settings window:
-
-```env
-JAHAN_NAMA_LABEL_FONT_FAMILY=IRANSansWeb
-JAHAN_NAMA_LABEL_FONT_SIZE=14
-```
+Optional GUI settings are saved automatically by the settings window. A Finder-launched macOS app uses `~/Library/Application Support/Jahan Nama/.env` when no custom `--env` path is provided.
 
 ## Usage
 
-Run the Windows overlay:
+Run the desktop app:
 
-```powershell
+```sh
 jahan-nama
 ```
 
 Print remaining traffic:
 
-```powershell
+```sh
 jahan-nama remain
 ```
 
 Print JSON summary:
 
-```powershell
+```sh
 jahan-nama json
 ```
 
 Print the raw API response:
 
-```powershell
+```sh
 jahan-nama raw
 ```
 
 Run the diagnostic flow:
 
-```powershell
+```sh
 jahan-nama test
 ```
 
 Use a custom env file or polling interval:
 
-```powershell
-jahan-nama --env C:\path\to\.env --interval 60
+```sh
+jahan-nama --env /path/to/.env --interval 60
 ```
 
 `unused` is kept as an alias for `remain`.
 
 ## Development
 
+On macOS, install Rust first:
+
+```sh
+brew install rustup
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+rustup default stable
+echo 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"' >> ~/.zshrc
+```
+
+Restart Terminal after updating `~/.zshrc`, or run this in the current shell:
+
+```sh
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+```
+
 Build:
 
-```powershell
+```sh
 cargo build
 ```
 
 Run tests:
 
-```powershell
+```sh
 cargo test
 ```
 
 Build a release binary:
 
-```powershell
+```sh
 cargo build --release
 ```
+
+Build an unsigned macOS DMG:
+
+```sh
+bash scripts/package-macos.sh
+```
+
+Unsigned macOS apps may need to be opened with right-click `Open` the first time.
 
 The project intentionally does not keep `Cargo.lock` in the repository.
 
@@ -108,6 +132,7 @@ The workflow builds:
 - `jahan-nama-<version>-windows-x64.msi`
 - `jahan-nama-<version>-windows-x64-setup.exe`
 - `jahan-nama-<version>-windows-x64-setup-bundle.zip`
+- `jahan-nama-<version>-macos-arm64.dmg`
 
 ## API
 
