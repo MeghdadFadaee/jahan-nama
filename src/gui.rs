@@ -515,11 +515,18 @@ mod macos_gui {
                         });
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.add(Button::new("Settings")).clicked() {
+                            let settings_button = Button::new(RichText::new("⚙").size(16.0))
+                                .min_size(Vec2::splat(28.0));
+                            if ui.add(settings_button).on_hover_text("Settings").clicked() {
                                 self.open_settings(false);
                             }
                             if ui
-                                .add_enabled(!self.fetching, Button::new("Reload"))
+                                .add_enabled(
+                                    !self.fetching,
+                                    Button::new(RichText::new("↻").size(17.0))
+                                        .min_size(Vec2::splat(28.0)),
+                                )
+                                .on_hover_text("Reload now")
                                 .clicked()
                             {
                                 self.start_fetch(ctx, true);
