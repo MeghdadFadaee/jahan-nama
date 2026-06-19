@@ -41,7 +41,7 @@ mod macos_gui {
     const DEFAULT_LABEL_FONT: &str = "SF Pro Text";
     const DEFAULT_LABEL_FONT_SIZE: i32 = 15;
     const DEFAULT_OVERLAY_WIDTH: f32 = 300.0;
-    const DEFAULT_OVERLAY_HEIGHT: f32 = 92.0;
+    const DEFAULT_OVERLAY_HEIGHT: f32 = 76.0;
     const DEFAULT_OVERLAY_X: f32 = 960.0;
     const DEFAULT_OVERLAY_Y: f32 = 64.0;
     const SETTINGS_BG: Color32 = Color32::from_rgb(244, 247, 251);
@@ -68,6 +68,7 @@ mod macos_gui {
             .with_resizable(false)
             .with_decorations(false)
             .with_transparent(true)
+            .with_has_shadow(false)
             .with_position(settings.overlay_position());
 
         let options = eframe::NativeOptions {
@@ -723,6 +724,10 @@ mod macos_gui {
             }
 
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+
+        fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+            [0.0, 0.0, 0.0, 0.0]
         }
     }
 
