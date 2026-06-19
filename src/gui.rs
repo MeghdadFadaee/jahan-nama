@@ -36,7 +36,7 @@ mod macos_gui {
     use jahan_nama::format::remaining_label;
     use jahan_nama::{DotEnvStore, JahanNamaClient, JahanNamaError, Result, reset_saved_token};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+    use tray_icon::{TrayIcon, TrayIconBuilder};
 
     const DEFAULT_LABEL_FONT: &str = "SF Pro Text";
     const DEFAULT_LABEL_FONT_SIZE: i32 = 15;
@@ -773,12 +773,9 @@ mod macos_gui {
             .map_err(|error| error.to_string())?;
         menu.append(&quit).map_err(|error| error.to_string())?;
 
-        let icon = load_tray_icon()?;
         let tray = TrayIconBuilder::new()
             .with_title(label)
             .with_tooltip("Jahan Nama")
-            .with_icon(icon)
-            .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(true)
             .build()
@@ -795,14 +792,6 @@ mod macos_gui {
             _separator_a: separator_a,
             _separator_b: separator_b,
         })
-    }
-
-    fn load_tray_icon() -> std::result::Result<Icon, String> {
-        let image = image::load_from_memory(include_bytes!("../icon.png"))
-            .map_err(|error| error.to_string())?
-            .into_rgba8();
-        let (width, height) = image.dimensions();
-        Icon::from_rgba(image.into_raw(), width, height).map_err(|error| error.to_string())
     }
 
     fn resolve_env_path(path: PathBuf) -> PathBuf {
