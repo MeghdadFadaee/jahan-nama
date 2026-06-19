@@ -23,15 +23,15 @@ pub fn run_gui(_env_path: PathBuf, _interval_seconds: u64) -> Result<()> {
 mod macos_gui {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::process::{self, Command};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use eframe::egui::{
         self, Align, Button, CentralPanel, Color32, Context, CornerRadius, DragValue, Frame, Id,
-        Layout, Margin, RichText, Sense, Stroke, TextEdit, ViewportBuilder, ViewportCommand,
-        ViewportId,
+        Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, TextEdit, Vec2,
+        ViewportBuilder, ViewportCommand, ViewportId,
     };
     use jahan_nama::format::remaining_label;
     use jahan_nama::{DotEnvStore, JahanNamaClient, JahanNamaError, Result, reset_saved_token};
@@ -44,6 +44,12 @@ mod macos_gui {
     const DEFAULT_OVERLAY_HEIGHT: f32 = 92.0;
     const DEFAULT_OVERLAY_X: f32 = 960.0;
     const DEFAULT_OVERLAY_Y: f32 = 64.0;
+    const SETTINGS_BG: Color32 = Color32::from_rgb(244, 247, 251);
+    const SETTINGS_SURFACE: Color32 = Color32::from_rgb(255, 255, 255);
+    const SETTINGS_BORDER: Color32 = Color32::from_rgb(218, 225, 235);
+    const SETTINGS_TEXT: Color32 = Color32::from_rgb(24, 33, 45);
+    const SETTINGS_MUTED: Color32 = Color32::from_rgb(91, 103, 118);
+    const SETTINGS_ACCENT: Color32 = Color32::from_rgb(14, 109, 242);
 
     const MENU_RELOAD: &str = "reload";
     const MENU_TOGGLE_OVERLAY: &str = "toggle-overlay";
@@ -173,7 +179,14 @@ mod macos_gui {
 
     struct TrayHandles {
         tray: TrayIcon,
+        _reload: MenuItem,
         toggle_overlay: MenuItem,
+        _settings: MenuItem,
+        _reset: MenuItem,
+        _open_config: MenuItem,
+        _quit: MenuItem,
+        _separator_a: PredefinedMenuItem,
+        _separator_b: PredefinedMenuItem,
     }
 
     struct MacApp {
@@ -192,6 +205,7 @@ mod macos_gui {
         show_settings: bool,
         message: Option<String>,
         applied_visibility: Option<bool>,
+        quit_requested: bool,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -210,8 +224,27 @@ mod macos_gui {
             let (fetch_tx, fetch_rx) = mpsc::channel();
             let (menu_tx, menu_rx) = mpsc::channel();
             let ctx = creation.egui_ctx.clone();
+            let menu_env_path = env_path.clone();
+            creation.egui_ctx.set_visuals(egui::Visuals::light());
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                let _ = menu_tx.send(event.id().as_ref().to_owned());
+                let id = event.id().as_ref().to_owned();
+                match id.as_str() {
+                    MENU_QUIT => process::exit(0),
+                    MENU_OPEN_CONFIG => {
+                        open_config_folder_path(&menu_env_path);
+                        return;
+                    }
+                    MENU_RESET_TOKEN => {
+                        let _ = ensure_env_parent(&menu_env_path)
+                            .and_then(|_| reset_saved_token(&menu_env_path));
+                    }
+                    MENU_TOGGLE_OVERLAY | MENU_SETTINGS => {
+                        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                    }
+                    _ => {}
+                }
+
+                let _ = menu_tx.send(id);
                 ctx.request_repaint();
             }));
 
@@ -231,6 +264,7 @@ mod macos_gui {
                 show_settings: false,
                 message: None,
                 applied_visibility: None,
+                quit_requested: false,
             };
 
             app.tray = match create_tray(&app.label, app.settings.overlay_visible) {
@@ -242,10 +276,8 @@ mod macos_gui {
             };
 
             if !app.settings.has_credentials() {
-                app.open_settings();
-                app.status = LabelStatus::Error;
-                app.label = "Setup needed".to_owned();
-                app.detail = "Add your account in Settings".to_owned();
+                app.show_missing_credentials();
+                app.open_settings(true);
                 app.update_tray_title();
             } else {
                 app.start_fetch(&creation.egui_ctx, true);
@@ -260,10 +292,12 @@ mod macos_gui {
             }
 
             if !self.settings.has_credentials() {
-                self.open_settings();
-                self.status = LabelStatus::Error;
-                self.label = "Setup needed".to_owned();
-                self.detail = "Add your account in Settings".to_owned();
+                self.show_missing_credentials();
+                if force && !self.show_settings {
+                    self.open_settings(true);
+                }
+                self.next_fetch =
+                    Instant::now() + Duration::from_secs(self.settings.interval_seconds.max(1));
                 self.update_tray_title();
                 return;
             }
@@ -306,8 +340,17 @@ mod macos_gui {
             self.update_tray_title();
         }
 
-        fn open_settings(&mut self) {
-            self.draft = SettingsDraft::from(&self.settings);
+        fn show_missing_credentials(&mut self) {
+            self.status = LabelStatus::Error;
+            self.label = "Setup needed".to_owned();
+            self.detail = "Add your account in Settings".to_owned();
+            self.message = Some("Enter your Jahan Nama username and password.".to_owned());
+        }
+
+        fn open_settings(&mut self, refresh_draft: bool) {
+            if refresh_draft || !self.show_settings {
+                self.draft = SettingsDraft::from(&self.settings);
+            }
             self.show_settings = true;
         }
 
@@ -418,10 +461,13 @@ mod macos_gui {
                     self.update_overlay_menu_text();
                     self.apply_overlay_visibility(ctx);
                 }
-                MENU_SETTINGS => self.open_settings(),
+                MENU_SETTINGS => self.open_settings(false),
                 MENU_RESET_TOKEN => self.reset_token(ctx),
                 MENU_OPEN_CONFIG => self.open_config_folder(),
-                MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
+                MENU_QUIT => {
+                    self.quit_requested = true;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
                 _ => {}
             }
         }
@@ -469,7 +515,7 @@ mod macos_gui {
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.add(Button::new("Settings")).clicked() {
-                                self.open_settings();
+                                self.open_settings(false);
                             }
                             if ui
                                 .add_enabled(!self.fetching, Button::new("Reload"))
@@ -486,8 +532,8 @@ mod macos_gui {
             let mut close_requested = false;
             let builder = ViewportBuilder::default()
                 .with_title("Jahan Nama Settings")
-                .with_inner_size([520.0, 390.0])
-                .with_min_inner_size([480.0, 360.0])
+                .with_inner_size([560.0, 460.0])
+                .with_min_inner_size([520.0, 430.0])
                 .with_resizable(false);
 
             ctx.show_viewport_immediate(
@@ -501,74 +547,128 @@ mod macos_gui {
                     CentralPanel::default()
                         .frame(
                             Frame::new()
-                                .fill(Color32::from_rgb(245, 247, 250))
+                                .fill(SETTINGS_BG)
                                 .inner_margin(Margin::same(18)),
                         )
                         .show_inside(ui, |ui| {
-                            ui.heading("Jahan Nama");
-                            ui.label("Account and display settings");
-                            ui.add_space(12.0);
+                            ui.visuals_mut().override_text_color = Some(SETTINGS_TEXT);
+                            ui.spacing_mut().item_spacing = Vec2::new(10.0, 8.0);
 
-                            ui.label("Username");
-                            ui.add(
-                                TextEdit::singleline(&mut self.draft.username)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            ui.add_space(8.0);
-
-                            ui.label("Password");
-                            ui.add(
-                                TextEdit::singleline(&mut self.draft.password)
-                                    .password(true)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            ui.add_space(8.0);
-
-                            ui.horizontal(|ui| {
-                                ui.label("Refresh interval");
-                                ui.add(
-                                    DragValue::new(&mut self.draft.interval_seconds)
-                                        .range(5..=86_400)
-                                        .speed(1.0),
-                                );
-                                ui.label("seconds");
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Font");
-                                ui.add(
-                                    TextEdit::singleline(&mut self.draft.label_font)
-                                        .desired_width(190.0),
-                                );
-                                ui.label("Size");
-                                ui.add(
-                                    DragValue::new(&mut self.draft.label_font_size)
-                                        .range(9..=48)
-                                        .speed(1.0),
-                                );
-                            });
-
-                            ui.checkbox(&mut self.draft.overlay_visible, "Show floating overlay");
-
-                            if let Some(message) = &self.message {
-                                ui.add_space(10.0);
+                            ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new(message).color(Color32::from_rgb(70, 82, 96)),
+                                    RichText::new("Jahan Nama")
+                                        .size(24.0)
+                                        .strong()
+                                        .color(SETTINGS_TEXT),
                                 );
-                            }
+                                ui.label(
+                                    RichText::new("Account and display settings")
+                                        .size(13.0)
+                                        .color(SETTINGS_MUTED),
+                                );
+                                ui.add_space(12.0);
 
-                            ui.with_layout(Layout::bottom_up(Align::RIGHT), |ui| {
-                                ui.horizontal(|ui| {
-                                    if ui.button("Close").clicked() {
+                                Frame::new()
+                                    .fill(SETTINGS_SURFACE)
+                                    .stroke(Stroke::new(1.0, SETTINGS_BORDER))
+                                    .corner_radius(CornerRadius::same(8))
+                                    .inner_margin(Margin::same(14))
+                                    .show(ui, |ui| {
+                                        ScrollArea::vertical()
+                                            .max_height(240.0)
+                                            .auto_shrink([false, true])
+                                            .show(ui, |ui| {
+                                                settings_label(ui, "Username");
+                                                ui.add(
+                                                    TextEdit::singleline(&mut self.draft.username)
+                                                        .desired_width(f32::INFINITY),
+                                                );
+                                                ui.add_space(8.0);
+
+                                                settings_label(ui, "Password");
+                                                ui.add(
+                                                    TextEdit::singleline(&mut self.draft.password)
+                                                        .password(true)
+                                                        .desired_width(f32::INFINITY),
+                                                );
+                                                ui.add_space(8.0);
+
+                                                ui.horizontal(|ui| {
+                                                    settings_label(ui, "Refresh interval");
+                                                    ui.add(
+                                                        DragValue::new(
+                                                            &mut self.draft.interval_seconds,
+                                                        )
+                                                        .range(5..=86_400)
+                                                        .speed(1.0),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("seconds")
+                                                            .color(SETTINGS_MUTED),
+                                                    );
+                                                });
+
+                                                ui.horizontal(|ui| {
+                                                    settings_label(ui, "Font");
+                                                    ui.add(
+                                                        TextEdit::singleline(
+                                                            &mut self.draft.label_font,
+                                                        )
+                                                        .desired_width(210.0),
+                                                    );
+                                                    settings_label(ui, "Size");
+                                                    ui.add(
+                                                        DragValue::new(
+                                                            &mut self.draft.label_font_size,
+                                                        )
+                                                        .range(9..=48)
+                                                        .speed(1.0),
+                                                    );
+                                                });
+
+                                                ui.checkbox(
+                                                    &mut self.draft.overlay_visible,
+                                                    "Show floating overlay",
+                                                );
+                                            });
+                                    });
+
+                                if let Some(message) = &self.message {
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        RichText::new(message).size(13.0).color(SETTINGS_MUTED),
+                                    );
+                                }
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.add_sized([72.0, 32.0], Button::new("Close")).clicked() {
                                         close_requested = true;
                                     }
-                                    if ui.button("Open Config Folder").clicked() {
-                                        self.open_config_folder();
+                                    if ui.add_sized([82.0, 32.0], Button::new("Reload")).clicked() {
+                                        self.start_fetch(ctx, true);
                                     }
-                                    if ui.button("Reset Token").clicked() {
+                                    if ui.add_sized([92.0, 32.0], Button::new("Reset")).clicked() {
                                         self.reset_token(ctx);
                                     }
-                                    if ui.button("Save").clicked() {
+                                    if ui.add_sized([86.0, 32.0], Button::new("Open")).clicked() {
+                                        self.open_config_folder();
+                                    }
+                                    if ui
+                                        .add_sized(
+                                            [86.0, 32.0],
+                                            Button::new(
+                                                RichText::new("Save")
+                                                    .strong()
+                                                    .color(Color32::WHITE),
+                                            )
+                                            .fill(SETTINGS_ACCENT),
+                                        )
+                                        .clicked()
+                                    {
                                         self.save_settings(ctx);
                                     }
                                 });
@@ -597,9 +697,22 @@ mod macos_gui {
                 self.handle_menu(&id, &ctx);
             }
 
+            if self.quit_requested {
+                process::exit(0);
+            }
+
+            if ui.input(|input| {
+                input.key_pressed(Key::Q) && input.modifiers.matches_logically(Modifiers::COMMAND)
+            }) {
+                process::exit(0);
+            }
+
             self.apply_overlay_visibility(&ctx);
 
-            if !self.fetching && Instant::now() >= self.next_fetch {
+            if self.settings.has_credentials()
+                && !self.fetching
+                && Instant::now() >= self.next_fetch
+            {
                 self.start_fetch(&ctx, false);
             }
 
@@ -611,6 +724,10 @@ mod macos_gui {
 
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+
+    fn settings_label(ui: &mut egui::Ui, text: &str) {
+        ui.label(RichText::new(text).size(13.0).strong().color(SETTINGS_TEXT));
     }
 
     fn fetch_remaining_mb(env_path: &Path) -> Result<f64> {
@@ -664,7 +781,14 @@ mod macos_gui {
 
         Ok(TrayHandles {
             tray,
+            _reload: reload,
             toggle_overlay,
+            _settings: settings,
+            _reset: reset,
+            _open_config: open_config,
+            _quit: quit,
+            _separator_a: separator_a,
+            _separator_b: separator_b,
         })
     }
 
@@ -698,6 +822,13 @@ mod macos_gui {
             fs::create_dir_all(parent)?;
         }
         Ok(())
+    }
+
+    fn open_config_folder_path(env_path: &Path) {
+        if let Some(parent) = env_path.parent() {
+            let _ = fs::create_dir_all(parent);
+            let _ = Command::new("open").arg(parent).spawn();
+        }
     }
 
     fn get_bool(value: &str) -> Option<bool> {
